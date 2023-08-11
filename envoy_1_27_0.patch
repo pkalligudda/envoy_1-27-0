@@ -1,0 +1,270 @@
+diff --git a/WORKSPACE b/WORKSPACE
+index 0f789feb23..a96cba5013 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -16,10 +16,6 @@ load("//bazel:repositories_extra.bzl", "envoy_dependencies_extra")
+ 
+ envoy_dependencies_extra()
+ 
+-load("//bazel:python_dependencies.bzl", "envoy_python_dependencies")
+-
+-envoy_python_dependencies()
+-
+ load("//bazel:dependency_imports.bzl", "envoy_dependency_imports")
+ 
+ envoy_dependency_imports()
+diff --git a/bazel/envoy_library.bzl b/bazel/envoy_library.bzl
+index 214c677012..0335eab69c 100644
+--- a/bazel/envoy_library.bzl
++++ b/bazel/envoy_library.bzl
+@@ -102,6 +102,7 @@ def envoy_cc_library(
+         repository = "",
+         tags = [],
+         deps = [],
++        target_compatible_with = [],
+         strip_include_prefix = None,
+         include_prefix = None,
+         textual_hdrs = None,
+@@ -132,6 +133,7 @@ def envoy_cc_library(
+             repository + "//envoy/common:base_includes",
+             envoy_external_dep_path("abseil_strings"),
+         ] + envoy_pch_deps(repository, "//source/common/common:common_pch"),
++        target_compatible_with = target_compatible_with,
+         alwayslink = alwayslink,
+         linkstatic = envoy_linkstatic(),
+         strip_include_prefix = strip_include_prefix,
+diff --git a/bazel/envoy_test.bzl b/bazel/envoy_test.bzl
+index ad05121a99..f14c485ae3 100644
+--- a/bazel/envoy_test.bzl
++++ b/bazel/envoy_test.bzl
+@@ -150,6 +150,7 @@ def envoy_cc_test(
+         # List of pairs (Bazel shell script target, shell script args)
+         repository = "",
+         external_deps = [],
++        target_compatible_with = [],
+         deps = [],
+         tags = [],
+         args = [],
+@@ -179,6 +180,7 @@ def envoy_cc_test(
+         ] + envoy_pch_deps(repository, "//test:test_pch"),
+         # from https://github.com/google/googletest/blob/6e1970e2376c14bf658eb88f655a054030353f9f/googlemock/src/gmock.cc#L51
+         # 2 - by default, mocks act as StrictMocks.
++        target_compatible_with = target_compatible_with,
+         args = args + ["--gmock_default_mock_behavior=2"],
+         tags = coverage_tags,
+         local = local,
+diff --git a/bazel/repositories.bzl b/bazel/repositories.bzl
+index a33c90baa2..8a644c0be0 100644
+--- a/bazel/repositories.bzl
++++ b/bazel/repositories.bzl
+@@ -361,6 +361,7 @@ def _boringssl():
+         patch_args = ["-p1"],
+         patches = [
+             "@envoy//bazel:boringssl_static.patch",
++            "@envoy//bazel:boringssl_ppc64le.patch",
+         ],
+     )
+ 
+diff --git a/bazel/repositories_extra.bzl b/bazel/repositories_extra.bzl
+index 40d348073f..1c7273027a 100644
+--- a/bazel/repositories_extra.bzl
++++ b/bazel/repositories_extra.bzl
+@@ -1,29 +1,35 @@
+ load("@emsdk//:deps.bzl", emsdk_deps = "deps")
+-load("@rules_python//python:repositories.bzl", "python_register_toolchains")
++load("@rules_python//python:pip.bzl", "pip_install", "pip_parse")
+ load("@proxy_wasm_cpp_host//bazel/cargo/wasmtime:crates.bzl", "wasmtime_fetch_remote_crates")
+ load("//bazel/external/cargo:crates.bzl", "raze_fetch_remote_crates")
+ load("@aspect_bazel_lib//lib:repositories.bzl", "aspect_bazel_lib_dependencies")
+ 
+-def _python_minor_version(python_version):
+-    return "_".join(python_version.split(".")[:-1])
++# Python dependencies.
++def _python_deps():
++    pip_parse(
++        name = "base_pip3",
++        requirements_lock = "@envoy//tools/base:requirements.txt",
++        extra_pip_args = ["--require-hashes"],
++    )
++
++    # These need to use `pip_install`
++    pip_install(
++        # Note: dev requirements do *not* check hashes
++        name = "dev_pip3",
++        requirements = "@envoy//tools/dev:requirements.txt",
++    )
++    pip_install(
++        name = "fuzzing_pip3",
++        requirements = "@rules_fuzzing//fuzzing:requirements.txt",
++        extra_pip_args = ["--require-hashes"],
++    )
+ 
+-# Python version for `rules_python`
+-PYTHON_VERSION = "3.11.3"
+-PYTHON_MINOR_VERSION = _python_minor_version(PYTHON_VERSION)
+ 
+ # Envoy deps that rely on a first stage of dependency loading in envoy_dependencies().
+-def envoy_dependencies_extra(
+-        python_version = PYTHON_VERSION,
+-        ignore_root_user_error = False):
++def envoy_dependencies_extra():
++    _python_deps()
+     emsdk_deps()
+     raze_fetch_remote_crates()
+     wasmtime_fetch_remote_crates()
+ 
+-    # Registers underscored Python minor version - eg `python3_10`
+-    python_register_toolchains(
+-        name = "python%s" % _python_minor_version(python_version),
+-        python_version = python_version,
+-        ignore_root_user_error = ignore_root_user_error,
+-    )
+-
+     aspect_bazel_lib_dependencies()
+diff --git a/bazel/rules_go.patch b/bazel/rules_go.patch
+index b0b707b88e..6e5cea047d 100644
+--- a/bazel/rules_go.patch
++++ b/bazel/rules_go.patch
+@@ -12,6 +12,18 @@
+ # - https://github.com/bazelbuild/rules_go/pull/2542
+ # - https://github.com/envoyproxy/envoy/issues/11657
+ #
++diff --git a/go/private/platforms.bzl b/go/private/platforms.bzl
++index a16e2993..21a62e90 100644
++--- a/go/private/platforms.bzl
+++++ b/go/private/platforms.bzl
++@@ -30,7 +30,6 @@ BAZEL_GOARCH_CONSTRAINTS = {
++     "amd64": "@platforms//cpu:x86_64",
++     "arm": "@platforms//cpu:arm",
++     "arm64": "@platforms//cpu:aarch64",
++-    "ppc64": "@platforms//cpu:ppc",
++     "ppc64le": "@platforms//cpu:ppc",
++     "s390x": "@platforms//cpu:s390x",
++ }
+ diff --git a/go/private/rules/binary.bzl b/go/private/rules/binary.bzl
+ index 91748eda..c1aeb91e 100644
+ --- a/go/private/rules/binary.bzl
+diff --git a/envoy/common/optref.h b/envoy/common/optref.h
+index 869720b6ae..05e0d27af3 100644
+--- a/envoy/common/optref.h
++++ b/envoy/common/optref.h
+@@ -101,7 +101,7 @@ template <class T> struct OptRef {
+    *
+    * @return a reference_wrapper around the value.
+    */
+-  std::reference_wrapper<const T> value() const { return std::reference_wrapper<T>(*ptr_); }
++  std::reference_wrapper<const T> value() const { return std::reference_wrapper<const T>(*ptr_); }
+   std::reference_wrapper<T> value() { return std::reference_wrapper<T>(*ptr_); }
+ 
+   /**
+diff --git a/source/extensions/filters/common/lua/BUILD b/source/extensions/filters/common/lua/BUILD
+index 12d7d0554a..b87564739b 100644
+--- a/source/extensions/filters/common/lua/BUILD
++++ b/source/extensions/filters/common/lua/BUILD
+@@ -15,6 +15,10 @@ envoy_cc_library(
+     external_deps = [
+         "luajit",
+     ],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//envoy/thread_local:thread_local_interface",
+         "//source/common/common:assert_lib",
+@@ -29,6 +33,10 @@ envoy_cc_library(
+     name = "wrappers_lib",
+     srcs = ["wrappers.cc"],
+     hdrs = ["wrappers.h"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         ":lua_lib",
+         "//envoy/buffer:buffer_interface",
+diff --git a/test/extensions/filters/common/lua/BUILD b/test/extensions/filters/common/lua/BUILD
+index 339e181ff7..1f97d349f9 100644
+--- a/test/extensions/filters/common/lua/BUILD
++++ b/test/extensions/filters/common/lua/BUILD
+@@ -12,6 +12,10 @@ envoy_package()
+ envoy_cc_test(
+     name = "lua_test",
+     srcs = ["lua_test.cc"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//source/common/thread_local:thread_local_lib",
+         "//source/extensions/filters/common/lua:lua_lib",
+@@ -24,6 +28,10 @@ envoy_cc_test(
+ envoy_cc_test(
+     name = "wrappers_test",
+     srcs = ["wrappers_test.cc"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         ":lua_wrappers_lib",
+         "//source/common/buffer:buffer_lib",
+@@ -38,6 +46,10 @@ envoy_cc_test(
+ envoy_cc_test_library(
+     name = "lua_wrappers_lib",
+     hdrs = ["lua_wrappers.h"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//source/extensions/filters/common/lua:lua_lib",
+         "//test/mocks/thread_local:thread_local_mocks",
+diff --git a/test/extensions/filters/http/lua/BUILD b/test/extensions/filters/http/lua/BUILD
+index fc9925019f..7fd02fdfdd 100644
+--- a/test/extensions/filters/http/lua/BUILD
++++ b/test/extensions/filters/http/lua/BUILD
+@@ -15,6 +15,10 @@ envoy_extension_cc_test(
+     name = "lua_filter_test",
+     srcs = ["lua_filter_test.cc"],
+     extension_names = ["envoy.filters.http.lua"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//source/common/stream_info:stream_info_lib",
+         "//source/extensions/filters/http/lua:lua_filter_lib",
+@@ -35,6 +39,10 @@ envoy_extension_cc_test(
+     name = "wrappers_test",
+     srcs = ["wrappers_test.cc"],
+     extension_names = ["envoy.filters.http.lua"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//source/common/network:address_lib",
+         "//source/common/stream_info:stream_info_lib",
+@@ -51,6 +59,10 @@ envoy_extension_cc_test(
+     size = "large",
+     srcs = ["lua_integration_test.cc"],
+     extension_names = ["envoy.filters.http.lua"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }),
+     deps = [
+         "//source/extensions/filters/http/lua:config",
+         "//test/config:v2_link_hacks",
+@@ -65,6 +77,10 @@ envoy_extension_cc_test(
+     name = "config_test",
+     srcs = ["config_test.cc"],
+     extension_names = ["envoy.filters.http.lua"],
++    target_compatible_with = select({
++        "@platforms//cpu:ppc": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    }), 
+     deps = [
+         "//source/extensions/filters/http/lua:config",
+         "//test/mocks/server:factory_context_mocks",
